@@ -1,0 +1,30 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    function isValidId(id) {
+      return id is string && id.size() > 0 && id.size() <= 128;
+    }
+
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    // Orders collection:
+    // Read is allowed publicly so team members can view order tracking via direct WhatsApp links without barrier
+    // Write requires valid document ID
+    match /orders/{orderId} {
+      allow read: if true;
+      allow create, update: if isValidId(orderId);
+      allow delete: if isSignedIn() && isValidId(orderId);
+    }
+
+    // User profiles collection:
+    // Users can read profiles and manage their own profile record
+    match /users/{userId} {
+      allow read: if isSignedIn();
+      allow create, update: if isSignedIn() && request.auth.uid == userId;
+      allow delete: if isSignedIn() && request.auth.uid == userId;
+    }
+  }
+}

@@ -1,0 +1,60 @@
+{
+  "entities": {
+    "Order": {
+      "title": "Order",
+      "description": "Mining procurement requisition order with manual items and live status",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "referenceNumber": { "type": "string" },
+        "siteCode": { "type": "string" },
+        "departmentCode": { "type": "string" },
+        "departmentName": { "type": "string" },
+        "requestedFrom": { "type": "string" },
+        "executionDays": { "type": "string" },
+        "year": { "type": "string" },
+        "sequenceNumber": { "type": "number" },
+        "orderDate": { "type": "string" },
+        "requesterName": { "type": "string" },
+        "requesterEmail": { "type": "string" },
+        "purpose": { "type": "string" },
+        "priority": { "type": "string" },
+        "pagesCount": { "type": "number" },
+        "status": { "type": "string" },
+        "urgencyAlertSent": { "type": "boolean" },
+        "items": { "type": "array" },
+        "approvals": { "type": "array" },
+        "createdAt": { "type": "string" },
+        "lastUpdated": { "type": "string" }
+      },
+      "required": ["id", "referenceNumber", "status", "items", "createdAt"]
+    },
+    "UserProfile": {
+      "title": "UserProfile",
+      "description": "Authenticated user profile and roles for the WDM mining procurement portal",
+      "type": "object",
+      "properties": {
+        "uid": { "type": "string" },
+        "email": { "type": "string" },
+        "displayName": { "type": "string" },
+        "photoURL": { "type": "string" },
+        "role": { "type": "string" },
+        "siteCode": { "type": "string" },
+        "departmentCode": { "type": "string" },
+        "lastLoginAt": { "type": "string" },
+        "createdAt": { "type": "string" }
+      },
+      "required": ["uid", "email", "role"]
+    }
+  },
+  "firestore": {
+    "/orders/{orderId}": {
+      "schema": "Order",
+      "description": "Mining procurement requisition orders accessible via link and tracking"
+    },
+    "/users/{userId}": {
+      "schema": "UserProfile",
+      "description": "User profiles tracking authenticated users, roles, and site affiliations"
+    }
+  }
+}

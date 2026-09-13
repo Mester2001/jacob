@@ -1,0 +1,7 @@
+{
+  "name": "نظام إدارة وتتبع الطلبات",
+  "description": "منصة مخصصة لتقديم الطلبات ومتابعة حالاتها الميدانية عبر الروابط المباشرة مع مزامنة سحابية لحظية عبر Firebase Firestore",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
+
