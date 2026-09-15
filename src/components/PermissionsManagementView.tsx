@@ -24,9 +24,10 @@ import {
   ChevronLeft,
   PenTool,
 } from 'lucide-react';
-import { AppUser, AuditLogEntry, PermissionAction, PermissionDefinition, RoleDefinition, UserRole } from '../types';
+import { AppUser, AuditLogEntry, AuditLogCategory, PermissionAction, PermissionDefinition, RoleDefinition, UserRole } from '../types';
 import { ALL_PERMISSIONS, formatFinancialLimit } from '../data/permissionsData';
 import { SITES, DEPARTMENTS } from '../data/initialData';
+import { AuditModificationDetails } from './AuditModificationDetails';
 
 interface PermissionsManagementViewProps {
   currentUserRole: UserRole;
@@ -61,6 +62,7 @@ export const PermissionsManagementView: React.FC<PermissionsManagementViewProps>
   const [permissionCategoryFilter, setPermissionCategoryFilter] = useState<string>('ALL');
   const [searchQuery, setSearchQuery] = useState('');
   const [auditSeverityFilter, setAuditSeverityFilter] = useState<string>('ALL');
+  const [auditCategoryFilter, setAuditCategoryFilter] = useState<string>('ALL');
   const [showAddUserModal, setShowAddUserModal] = useState(false);
   const [selectedRoleForDetail, setSelectedRoleForDetail] = useState<UserRole | null>('SITE_MANAGER');
   const [saveSuccessMsg, setSaveSuccessMsg] = useState<string | null>(null);
@@ -163,25 +165,48 @@ export const PermissionsManagementView: React.FC<PermissionsManagementViewProps>
 
   // Export audit log CSV
   const handleExportAuditCSV = () => {
-    const headers = ['المعرف', 'التوقيت', 'المستخدم', 'الدور', 'النوع', 'الهدف', 'التفاصيل', 'عنوان IP', 'مستوى الخطورة'];
-    const rows = auditLogs.map((log) => [
-      log.id,
-      log.timestamp,
-      `"${log.userName}"`,
-      log.userRole,
-      `"${log.action}"`,
-      `"${log.target}"`,
-      `"${log.details.replace(/"/g, '""')}"`,
-      log.ipAddress,
-      log.severity,
-    ]);
+    const headers = [
+      'المعرف',
+      'التوقيت',
+      'المستخدم',
+      'الدور',
+      'التصنيف',
+      'نوع الإجراء',
+      'الهدف / رقم الطلب',
+      'تفاصيل التدقيق والتعديلات الفنية',
+      'ملخص التغييرات',
+      'عدد التعديلات',
+      'عنوان IP',
+      'مستوى التدقيق'
+    ];
+    const rows = auditLogs.map((log) => {
+      const summaryText = log.summaryChanges && log.summaryChanges.length > 0
+        ? log.summaryChanges.join(' | ')
+        : log.details;
+      const modCount = (log.itemChanges?.length || 0) + (log.fieldDiffs?.length || 0);
+
+      return [
+        log.id,
+        log.timestamp,
+        `"${log.userName}"`,
+        log.userRole,
+        `"${log.category || 'عام'}"`,
+        `"${log.action}"`,
+        `"${log.target}"`,
+        `"${log.details.replace(/"/g, '""')}"`,
+        `"${summaryText.replace(/"/g, '""')}"`,
+        modCount,
+        log.ipAddress,
+        log.severity,
+      ];
+    });
 
     const csvContent = '\uFEFF' + [headers.join(','), ...rows.map((e) => e.join(','))].join('\n');
     const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
     const url = URL.createObjectURL(blob);
     const link = document.createElement('a');
     link.setAttribute('href', url);
-    link.setAttribute('download', `WDM_Security_Audit_Log_${new Date().toISOString().split('T')[0]}.csv`);
+    link.setAttribute('download', `WDM_Audit_Log_Detailed_${new Date().toISOString().split('T')[0]}.csv`);
     document.body.appendChild(link);
     link.click();
     document.body.removeChild(link);
@@ -219,14 +244,40 @@ export const PermissionsManagementView: React.FC<PermissionsManagementViewProps>
   // Filtered audit logs
   const filteredAuditLogs = auditLogs.filter((log) => {
     if (auditSeverityFilter !== 'ALL' && log.severity !== auditSeverityFilter) return false;
+    
+    // Category filtering
+    if (auditCategoryFilter !== 'ALL') {
+      if (auditCategoryFilter === 'CONTENT_MODIFICATION') {
+        const isMod =
+          log.category === 'CONTENT_MODIFICATION' ||
+          (log.itemChanges && log.itemChanges.length > 0) ||
+          (log.fieldDiffs && log.fieldDiffs.length > 0) ||
+          log.action.includes('تعديل');
+        if (!isMod) return false;
+      } else if (log.category !== auditCategoryFilter) {
+        return false;
+      }
+    }
+
     if (searchQuery.trim()) {
       const q = searchQuery.toLowerCase();
-      return (
+      const matchBasic =
         log.userName.toLowerCase().includes(q) ||
         log.action.toLowerCase().includes(q) ||
         log.target.toLowerCase().includes(q) ||
-        log.details.toLowerCase().includes(q)
+        log.details.toLowerCase().includes(q) ||
+        (log.orderReference && log.orderReference.toLowerCase().includes(q)) ||
+        (log.orderId && log.orderId.toLowerCase().includes(q));
+
+      const matchItemChanges = log.itemChanges?.some(
+        (it) =>
+          it.itemName.toLowerCase().includes(q) ||
+          (it.specs && it.specs.toLowerCase().includes(q))
       );
+
+      const matchSummary = log.summaryChanges?.some((s) => s.toLowerCase().includes(q));
+
+      return matchBasic || !!matchItemChanges || !!matchSummary;
     }
     return true;
   });
@@ -1013,42 +1064,81 @@ export const PermissionsManagementView: React.FC<PermissionsManagementViewProps>
       {activeTab === 'audit' && (
         <div className="space-y-4">
           {/* Audit filters */}
-          <div className="bg-white p-4 rounded-xl border border-slate-200 shadow-xs flex flex-col sm:flex-row sm:items-center justify-between gap-3">
-            <div className="flex items-center gap-2 overflow-x-auto">
-              <span className="text-xs font-bold text-slate-500 shrink-0">مستوى التدقيق:</span>
-              {['ALL', 'INFO', 'WARNING', 'CRITICAL', 'SECURITY'].map((sev) => (
-                <button
-                  key={sev}
-                  type="button"
-                  onClick={() => setAuditSeverityFilter(sev)}
-                  className={`px-3 py-1 rounded-lg text-xs font-semibold whitespace-nowrap transition ${
-                    auditSeverityFilter === sev
-                      ? 'bg-slate-900 text-white'
-                      : 'bg-slate-100 text-slate-700 hover:bg-slate-200'
-                  }`}
-                >
-                  {sev === 'ALL'
-                    ? 'كافة السجلات'
-                    : sev === 'INFO'
-                    ? 'إجرائي (Info)'
-                    : sev === 'WARNING'
-                    ? 'تنبيهات مهل (Warning)'
-                    : sev === 'SECURITY'
-                    ? 'أمان وصلاحيات (Security)'
-                    : 'حرج (Critical)'}
-                </button>
-              ))}
+          <div className="bg-white p-4 rounded-xl border border-slate-200 shadow-xs space-y-3">
+            {/* Row 1: Category filters */}
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pb-3 border-b border-slate-100">
+              <div className="flex items-center gap-1.5 overflow-x-auto">
+                <span className="text-xs font-bold text-slate-500 shrink-0 ml-1">نوع العملية:</span>
+                {[
+                  { key: 'ALL', label: 'كافة العمليات' },
+                  { key: 'CONTENT_MODIFICATION', label: '📝 تعديل المحتويات والأصناف', highlight: true },
+                  { key: 'STATUS_CHANGE', label: '🔄 تغيير الحالة' },
+                  { key: 'APPROVAL', label: '✍️ الاعتمادات والتوقيعات' },
+                  { key: 'LOGISTICS', label: '🚚 التوريد وأوامر الشراء' },
+                  { key: 'SECURITY', label: '🛡️ الأمان والـ RBAC' },
+                ].map((cat) => (
+                  <button
+                    key={cat.key}
+                    type="button"
+                    onClick={() => setAuditCategoryFilter(cat.key)}
+                    className={`px-2.5 py-1 rounded-lg text-xs font-bold whitespace-nowrap transition cursor-pointer ${
+                      auditCategoryFilter === cat.key
+                        ? cat.highlight
+                          ? 'bg-amber-500 text-slate-950 shadow-xs ring-2 ring-amber-300'
+                          : 'bg-slate-900 text-white shadow-xs'
+                        : cat.highlight
+                        ? 'bg-amber-50 text-amber-900 border border-amber-200 hover:bg-amber-100'
+                        : 'bg-slate-100 text-slate-700 hover:bg-slate-200'
+                    }`}
+                  >
+                    {cat.label}
+                  </button>
+                ))}
+              </div>
+
+              <div className="text-[11px] text-slate-500 font-bold shrink-0">
+                إجمالي السجلات: <span className="font-mono text-slate-900">{filteredAuditLogs.length}</span> من أصل <span className="font-mono text-slate-900">{auditLogs.length}</span>
+              </div>
             </div>
 
-            <div className="relative min-w-[240px]">
-              <Search className="w-4 h-4 absolute right-3 top-2.5 text-slate-400" />
-              <input
-                type="text"
-                value={searchQuery}
-                onChange={(e) => setSearchQuery(e.target.value)}
-                placeholder="بحث في السجلات أو المستخدم..."
-                className="w-full pr-9 pl-3 py-1.5 text-xs bg-slate-50 border border-slate-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-amber-500 focus:bg-white transition"
-              />
+            {/* Row 2: Severity filters and Search */}
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+              <div className="flex items-center gap-1.5 overflow-x-auto">
+                <span className="text-xs font-bold text-slate-500 shrink-0 ml-1">المستوى:</span>
+                {['ALL', 'INFO', 'WARNING', 'CRITICAL', 'SECURITY'].map((sev) => (
+                  <button
+                    key={sev}
+                    type="button"
+                    onClick={() => setAuditSeverityFilter(sev)}
+                    className={`px-2.5 py-1 rounded-lg text-xs font-semibold whitespace-nowrap transition cursor-pointer ${
+                      auditSeverityFilter === sev
+                        ? 'bg-slate-800 text-white'
+                        : 'bg-slate-100 text-slate-700 hover:bg-slate-200'
+                    }`}
+                  >
+                    {sev === 'ALL'
+                      ? 'كافة المستويات'
+                      : sev === 'INFO'
+                      ? 'إجرائي (Info)'
+                      : sev === 'WARNING'
+                      ? 'تنبيهات مهل (Warning)'
+                      : sev === 'SECURITY'
+                      ? 'أمان وصلاحيات (Security)'
+                      : 'حرج (Critical)'}
+                  </button>
+                ))}
+              </div>
+
+              <div className="relative min-w-[260px]">
+                <Search className="w-4 h-4 absolute right-3 top-2.5 text-slate-400" />
+                <input
+                  type="text"
+                  value={searchQuery}
+                  onChange={(e) => setSearchQuery(e.target.value)}
+                  placeholder="بحث برقم الطلب، الصنف، المستخدم، المواصفة..."
+                  className="w-full pr-9 pl-3 py-1.5 text-xs bg-slate-50 border border-slate-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-amber-500 focus:bg-white transition"
+                />
+              </div>
             </div>
           </div>
 
@@ -1058,63 +1148,91 @@ export const PermissionsManagementView: React.FC<PermissionsManagementViewProps>
               <table className="w-full text-right text-xs">
                 <thead>
                   <tr className="bg-slate-100 border-b border-slate-200 text-slate-700">
-                    <th className="p-3 font-bold">المعرف والتوقيت</th>
-                    <th className="p-3 font-bold">المستخدم المنفّذ</th>
-                    <th className="p-3 font-bold">نوع الإجراء</th>
-                    <th className="p-3 font-bold">الهدف / المستند</th>
-                    <th className="p-3 font-bold min-w-[300px]">تفاصيل العملية وسجل التدقيق</th>
-                    <th className="p-3 font-bold">عنوان الشبكة (IP)</th>
-                    <th className="p-3 font-bold text-center">المستوى</th>
+                    <th className="p-3 font-bold whitespace-nowrap">المعرف والتوقيت</th>
+                    <th className="p-3 font-bold whitespace-nowrap">المستخدم المنفّذ</th>
+                    <th className="p-3 font-bold whitespace-nowrap">نوع الإجراء والتصنيف</th>
+                    <th className="p-3 font-bold whitespace-nowrap">الهدف / رقم الطلب</th>
+                    <th className="p-3 font-bold min-w-[340px]">تفاصيل العملية وسجل تدقيق التعديلات</th>
+                    <th className="p-3 font-bold whitespace-nowrap">عنوان الشبكة (IP)</th>
+                    <th className="p-3 font-bold text-center whitespace-nowrap">المستوى</th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-slate-100">
-                  {filteredAuditLogs.map((log) => (
-                    <tr key={log.id} className="hover:bg-slate-50/80 transition">
-                      <td className="p-3 whitespace-nowrap">
-                        <span className="font-mono font-bold text-slate-900 block">{log.id}</span>
-                        <span className="text-[10px] text-slate-500">{log.timestamp}</span>
-                      </td>
-
-                      <td className="p-3 whitespace-nowrap">
-                        <span className="font-bold text-slate-900 block">{log.userName}</span>
-                        <span className="text-[10px] text-slate-500">[{log.userRole}]</span>
-                      </td>
-
-                      <td className="p-3 whitespace-nowrap">
-                        <span className="font-semibold text-slate-800 bg-slate-100 px-2 py-0.5 rounded text-[11px]">
-                          {log.action}
-                        </span>
-                      </td>
-
-                      <td className="p-3 whitespace-nowrap">
-                        <span className="font-mono font-bold text-blue-700">{log.target}</span>
-                      </td>
-
-                      <td className="p-3 text-slate-700 leading-relaxed">
-                        {log.details}
-                      </td>
-
-                      <td className="p-3 whitespace-nowrap font-mono text-[11px] text-slate-500 dir-ltr">
-                        {log.ipAddress}
-                      </td>
-
-                      <td className="p-3 text-center whitespace-nowrap">
-                        <span
-                          className={`text-[9px] font-bold px-2 py-0.5 rounded-full ${
-                            log.severity === 'SECURITY'
-                              ? 'bg-purple-100 text-purple-800'
-                              : log.severity === 'CRITICAL'
-                              ? 'bg-rose-100 text-rose-800'
-                              : log.severity === 'WARNING'
-                              ? 'bg-amber-100 text-amber-800'
-                              : 'bg-emerald-100 text-emerald-800'
-                          }`}
-                        >
-                          {log.severity}
-                        </span>
+                  {filteredAuditLogs.length === 0 ? (
+                    <tr>
+                      <td colSpan={7} className="p-8 text-center text-slate-500">
+                        لا توجد سجلات تدقيق مطابقة لمعايير التصفية والبحث الحالية.
                       </td>
                     </tr>
-                  ))}
+                  ) : (
+                    filteredAuditLogs.map((log) => {
+                      const isContentMod =
+                        log.category === 'CONTENT_MODIFICATION' ||
+                        (log.itemChanges && log.itemChanges.length > 0) ||
+                        (log.fieldDiffs && log.fieldDiffs.length > 0) ||
+                        log.action.includes('تعديل');
+
+                      const totalMods = (log.itemChanges?.length || 0) + (log.fieldDiffs?.length || 0);
+
+                      return (
+                        <tr key={log.id} className="hover:bg-slate-50/80 transition">
+                          <td className="p-3 whitespace-nowrap align-top">
+                            <span className="font-mono font-bold text-slate-900 block">{log.id}</span>
+                            <span className="text-[10px] text-slate-500">{log.timestamp}</span>
+                          </td>
+
+                          <td className="p-3 whitespace-nowrap align-top">
+                            <span className="font-bold text-slate-900 block">{log.userName}</span>
+                            <span className="text-[10px] text-slate-500">[{log.userRole}]</span>
+                          </td>
+
+                          <td className="p-3 whitespace-nowrap align-top space-y-1">
+                            <span className="font-semibold text-slate-800 bg-slate-100 px-2 py-0.5 rounded text-[11px] block text-center">
+                              {log.action}
+                            </span>
+                            {isContentMod && (
+                              <span className="bg-amber-100 text-amber-900 border border-amber-300 font-bold px-1.5 py-0.5 rounded text-[10px] block text-center">
+                                📝 تعديل محتويات {totalMods > 0 ? `(${totalMods})` : ''}
+                              </span>
+                            )}
+                          </td>
+
+                          <td className="p-3 whitespace-nowrap align-top">
+                            <span className="font-mono font-bold text-blue-700 block">{log.target}</span>
+                            {log.orderReference && log.target !== log.orderReference && (
+                              <span className="text-[10px] font-mono text-slate-500">
+                                {log.orderReference}
+                              </span>
+                            )}
+                          </td>
+
+                          <td className="p-3 text-slate-700 leading-relaxed align-top">
+                            <AuditModificationDetails log={log} />
+                          </td>
+
+                          <td className="p-3 whitespace-nowrap font-mono text-[11px] text-slate-500 dir-ltr align-top">
+                            {log.ipAddress}
+                          </td>
+
+                          <td className="p-3 text-center whitespace-nowrap align-top">
+                            <span
+                              className={`text-[9px] font-bold px-2 py-0.5 rounded-full ${
+                                log.severity === 'SECURITY'
+                                  ? 'bg-purple-100 text-purple-800'
+                                  : log.severity === 'CRITICAL'
+                                  ? 'bg-rose-100 text-rose-800'
+                                  : log.severity === 'WARNING'
+                                  ? 'bg-amber-100 text-amber-800'
+                                  : 'bg-emerald-100 text-emerald-800'
+                              }`}
+                            >
+                              {log.severity}
+                            </span>
+                          </td>
+                        </tr>
+                      );
+                    })
+                  )}
                 </tbody>
               </table>
             </div>

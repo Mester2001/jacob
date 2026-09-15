@@ -59,8 +59,11 @@ import {
   logOut,
   syncUserProfileToFirestore,
   getUserProfileFromFirestore,
+  saveAuditLogToFirestore,
+  subscribeToAuditLogs,
   type UserProfileDoc,
 } from './lib/firebase';
+import { computeOrderModifications } from './utils/auditDiff';
 import type { User as FirebaseUser } from 'firebase/auth';
 
 function getStatusArabicLabel(status: OrderStatus): string {
@@ -509,6 +512,33 @@ export default function App() {
     localStorage.setItem('wdm_audit_logs', JSON.stringify(auditLogs));
   }, [auditLogs]);
 
+  // Real-time Firestore sync for audit trail logs
+  useEffect(() => {
+    const unsubscribe = subscribeToAuditLogs(
+      (remoteLogs) => {
+        if (remoteLogs && remoteLogs.length > 0) {
+          setAuditLogs((prev) => {
+            const map = new Map<string, AuditLogEntry>();
+            // Keep existing/local
+            prev.forEach((l) => map.set(l.id, l));
+            // Layer remote
+            remoteLogs.forEach((l) => map.set(l.id, l));
+            const merged = Array.from(map.values());
+            merged.sort((a, b) => (b.timestamp || '').localeCompare(a.timestamp || ''));
+            return merged;
+          });
+        }
+      },
+      (error) => {
+        console.warn('Firestore audit logs subscription warning, using local logs:', error);
+      }
+    );
+
+    return () => {
+      unsubscribe();
+    };
+  }, []);
+
   // Helper to append audit log
   const handleAddAuditLog = (entry: Omit<AuditLogEntry, 'id' | 'timestamp'>) => {
     const newLog: AuditLogEntry = {
@@ -517,6 +547,11 @@ export default function App() {
       timestamp: new Date().toISOString().replace('T', ' ').substring(0, 19),
     };
     setAuditLogs((prev) => [newLog, ...prev]);
+
+    // Async persist to Firestore
+    saveAuditLogToFirestore(newLog).catch((err) => {
+      console.warn('Could not sync audit log to Firestore:', err);
+    });
   };
 
   // Active User object
@@ -665,8 +700,17 @@ export default function App() {
       userName: newOrder.requesterName,
       userRole: currentUserRole,
       action: 'إنشاء طلب مشتريات وتوليد رابط التتبع',
+      category: 'ORDER_CREATION',
       target: `الطلب: ${newOrder.referenceNumber}`,
-      details: `تم إنشاء الطلب بنجاح وتوليد رابط التتبع المباشر وإرساله للاعتماد الميداني.`,
+      orderId: newOrder.id,
+      orderReference: newOrder.referenceNumber,
+      details: `تم إنشاء الطلب بنجاح بعدد ${newOrder.items.length} أصناف وتوليد رابط التتبع المباشر وإرساله للاعتماد الميداني.`,
+      summaryChanges: [
+        `إضافة طلب جديد رقم ${newOrder.referenceNumber}`,
+        `عدد الأصناف الابتدائية: ${newOrder.items.length}`,
+        `الموقع: منجم الجكوب (${newOrder.siteCode})`,
+        `القسم: ${newOrder.departmentCode}`,
+      ],
       ipAddress: '10.0.5.88 (الموقع الميداني)',
       severity: 'INFO',
     });
@@ -680,6 +724,7 @@ export default function App() {
   // Quick Status Change (from Tracker View or Admin)
   const handleQuickStatusChange = (orderId: string, newStatus: OrderStatus) => {
     let orderToSync: Order | null = null;
+    const previousOrder = orders.find((o) => o.id === orderId);
 
     // Play status change chime if enabled
     if (audioSettings.soundEnabled && audioSettings.notifyOnStatusChange) {
@@ -716,22 +761,63 @@ export default function App() {
     }
 
     const targetOrder = orders.find((o) => o.id === orderId);
+    const oldStatusLabel = getStatusArabicLabel(previousOrder?.status || 'DRAFT');
+    const newStatusLabel = getStatusArabicLabel(newStatus);
     handleAddAuditLog({
       userId: activeUser.id,
       userName: activeUser.name,
       userRole: currentUserRole,
       action: 'تحديث حالة الطلب',
+      category: 'STATUS_CHANGE',
       target: `الطلب: ${targetOrder?.referenceNumber || orderId}`,
-      details: `تم تغيير حالة الطلب إلى [${newStatus}] بواسطة [${INITIAL_ROLE_CONFIGS[currentUserRole]?.title}].`,
+      orderId: orderId,
+      orderReference: targetOrder?.referenceNumber,
+      details: `تم تغيير حالة الطلب من [${oldStatusLabel}] إلى [${newStatusLabel}] بواسطة [${INITIAL_ROLE_CONFIGS[currentUserRole]?.title}].`,
+      fieldDiffs: [
+        {
+          field: 'status',
+          fieldLabel: 'حالة الطلب',
+          oldValue: oldStatusLabel,
+          newValue: newStatusLabel,
+        },
+      ],
+      summaryChanges: [`تغيير الحالة: ${oldStatusLabel} ➔ ${newStatusLabel}`],
       ipAddress: '192.168.10.15',
-      severity: 'INFO',
+      severity: newStatus === 'REJECTED' ? 'WARNING' : 'INFO',
     });
 
     showToast(`تم تحديث حالة الطلب ومزامنته مع Firebase والرابط المباشر!`, 'success');
   };
 
-  // Handle Order Updates (Manual items editing, metadata changes)
+  // Handle Order Updates (Manual items editing, metadata changes with deep content diffs)
   const handleUpdateOrder = (updatedOrder: Order) => {
+    const previousOrder = orders.find((o) => o.id === updatedOrder.id);
+
+    // Compute detailed item & metadata diffs
+    if (previousOrder) {
+      const diffResult = computeOrderModifications(previousOrder, updatedOrder);
+      if (diffResult.hasChanges) {
+        handleAddAuditLog({
+          userId: activeUser.id,
+          userName: activeUser.name,
+          userRole: currentUserRole,
+          action: 'تعديل محتويات وأصناف الطلب',
+          category: 'CONTENT_MODIFICATION',
+          target: `الطلب: ${updatedOrder.referenceNumber}`,
+          orderId: updatedOrder.id,
+          orderReference: updatedOrder.referenceNumber,
+          details:
+            diffResult.summaryLines.join(' | ') ||
+            `تم حفظ تعديلات على أصناف وبيانات استمارة الطلب رقم ${updatedOrder.referenceNumber}`,
+          itemChanges: diffResult.itemChanges,
+          fieldDiffs: diffResult.fieldDiffs,
+          summaryChanges: diffResult.summaryLines,
+          ipAddress: '192.168.10.15 (مكتب الإدارة والتوريد)',
+          severity: diffResult.severity,
+        });
+      }
+    }
+
     setOrders((prev) =>
       prev.map((order) => (order.id === updatedOrder.id ? updatedOrder : order))
     );
@@ -750,7 +836,7 @@ export default function App() {
       console.warn('Could not save updated order to Firestore:', err);
     });
 
-    showToast(`تم حفظ الأصناف وبيانات الاستمارة ومزامنتها سحابياً مع Firebase!`, 'success');
+    showToast(`تم حفظ الأصناف وتوثيق التعديلات في سجل التدقيق ومزامنتها سحابياً!`, 'success');
   };
 
   // Handle Approval Stage
@@ -761,6 +847,14 @@ export default function App() {
     signatureData: string,
     comments?: string
   ) => {
+    let orderToSync: Order | null = null;
+    const stageTitle =
+      stage === 'DEPT_HEAD'
+        ? 'رئيس القسم'
+        : stage === 'SITE_MANAGER'
+        ? 'مدير الموقع'
+        : 'المدير العام';
+
     setOrders((prev) =>
       prev.map((order) => {
         if (order.id !== orderId) return order;
@@ -791,6 +885,8 @@ export default function App() {
           lastUpdated: new Date().toISOString(),
         };
 
+        orderToSync = updatedOrder;
+
         if (selectedOrder?.id === orderId) {
           setSelectedOrder(updatedOrder);
         }
@@ -802,6 +898,34 @@ export default function App() {
       })
     );
 
+    if (orderToSync) {
+      saveOrderToFirestore(orderToSync).catch((err) => {
+        console.warn('Could not sync approval to Firestore:', err);
+      });
+    }
+
+    const targetOrder = orders.find((o) => o.id === orderId);
+    handleAddAuditLog({
+      userId: activeUser.id,
+      userName: approverName,
+      userRole: currentUserRole,
+      action: `اعتماد وتوقيع رقمي (${stageTitle})`,
+      category: 'APPROVAL',
+      target: `الطلب: ${targetOrder?.referenceNumber || orderId}`,
+      orderId,
+      orderReference: targetOrder?.referenceNumber,
+      details: `تم توثيق الاعتماد والتوقيع الرقمي بنجاح لمرحلة [${stageTitle}] بواسطة [${approverName}]. ${
+        comments ? `الملاحظات: ${comments}` : ''
+      }`,
+      summaryChanges: [
+        `اعتماد مرحلة ${stageTitle}`,
+        `المعتمد: ${approverName}`,
+        comments ? `ملاحظات: ${comments}` : 'بدون ملاحظات إضافية',
+      ],
+      ipAddress: '192.168.10.44',
+      severity: 'INFO',
+    });
+
     if (audioSettings.soundEnabled && audioSettings.notifyOnStatusChange) {
       playStatusChangeSound(audioSettings.volume);
     }
@@ -811,6 +935,7 @@ export default function App() {
 
   // Handle Rejection
   const handleRejectOrder = (orderId: string, reason: string) => {
+    let orderToSync: Order | null = null;
     setOrders((prev) =>
       prev.map((order) => {
         if (order.id !== orderId) return order;
@@ -831,6 +956,8 @@ export default function App() {
           ),
         };
 
+        orderToSync = updatedOrder;
+
         if (selectedOrder?.id === orderId) {
           setSelectedOrder(updatedOrder);
         }
@@ -842,6 +969,28 @@ export default function App() {
       })
     );
 
+    if (orderToSync) {
+      saveOrderToFirestore(orderToSync).catch((err) => {
+        console.warn('Could not sync rejection to Firestore:', err);
+      });
+    }
+
+    const targetOrder = orders.find((o) => o.id === orderId);
+    handleAddAuditLog({
+      userId: activeUser.id,
+      userName: activeUser.name,
+      userRole: currentUserRole,
+      action: 'رفض الطلب وإلغاء مسار الاعتماد',
+      category: 'STATUS_CHANGE',
+      target: `الطلب: ${targetOrder?.referenceNumber || orderId}`,
+      orderId,
+      orderReference: targetOrder?.referenceNumber,
+      details: `تم رفض الطلب بواسطة [${INITIAL_ROLE_CONFIGS[currentUserRole]?.title} - ${activeUser.name}]. سبب الرفض: ${reason}`,
+      summaryChanges: [`رفض الطلب: ${reason}`],
+      ipAddress: '192.168.10.44',
+      severity: 'WARNING',
+    });
+
     if (audioSettings.soundEnabled && audioSettings.notifyOnStatusChange) {
       playStatusChangeSound(audioSettings.volume);
     }
@@ -851,6 +1000,7 @@ export default function App() {
 
   // Handle Request Modification
   const handleRequestModification = (orderId: string, note: string) => {
+    let orderToSync: Order | null = null;
     setOrders((prev) =>
       prev.map((order) => {
         if (order.id !== orderId) return order;
@@ -871,6 +1021,8 @@ export default function App() {
           ),
         };
 
+        orderToSync = updatedOrder;
+
         if (selectedOrder?.id === orderId) {
           setSelectedOrder(updatedOrder);
         }
@@ -881,6 +1033,28 @@ export default function App() {
         return updatedOrder;
       })
     );
+
+    if (orderToSync) {
+      saveOrderToFirestore(orderToSync).catch((err) => {
+        console.warn('Could not sync modification request to Firestore:', err);
+      });
+    }
+
+    const targetOrder = orders.find((o) => o.id === orderId);
+    handleAddAuditLog({
+      userId: activeUser.id,
+      userName: activeUser.name,
+      userRole: currentUserRole,
+      action: 'طلب استكمال وتعديل المواصفات',
+      category: 'STATUS_CHANGE',
+      target: `الطلب: ${targetOrder?.referenceNumber || orderId}`,
+      orderId,
+      orderReference: targetOrder?.referenceNumber,
+      details: `تم طلب استكمال وتعديل مواصفات الطلب بواسطة [${INITIAL_ROLE_CONFIGS[currentUserRole]?.title}]. الملاحظات: ${note}`,
+      summaryChanges: [`طلب تعديل واستكمال: ${note}`],
+      ipAddress: '192.168.10.44',
+      severity: 'INFO',
+    });
 
     if (audioSettings.soundEnabled && audioSettings.notifyOnStatusChange) {
       playStatusChangeSound(audioSettings.volume);
@@ -894,6 +1068,7 @@ export default function App() {
     orderId: string,
     poData: { poNumber: string; vendor: string; shippingMethod: string; slaDays: number }
   ) => {
+    let orderToSync: Order | null = null;
     setOrders((prev) =>
       prev.map((order) => {
         if (order.id !== orderId) return order;
@@ -912,6 +1087,8 @@ export default function App() {
           lastUpdated: new Date().toISOString(),
         };
 
+        orderToSync = updatedOrder;
+
         if (selectedOrder?.id === orderId) {
           setSelectedOrder(updatedOrder);
         }
@@ -923,6 +1100,33 @@ export default function App() {
       })
     );
 
+    if (orderToSync) {
+      saveOrderToFirestore(orderToSync).catch((err) => {
+        console.warn('Could not sync PO issuance to Firestore:', err);
+      });
+    }
+
+    const targetOrder = orders.find((o) => o.id === orderId);
+    handleAddAuditLog({
+      userId: activeUser.id,
+      userName: activeUser.name,
+      userRole: currentUserRole,
+      action: 'إصدار أمر الشراء (PO) وتعيين المورد',
+      category: 'LOGISTICS',
+      target: `الطلب: ${targetOrder?.referenceNumber || orderId}`,
+      orderId,
+      orderReference: targetOrder?.referenceNumber,
+      details: `تم إصدار أمر الشراء رقم [${poData.poNumber}] للمورد [${poData.vendor}] وطريقة الشحن [${poData.shippingMethod}].`,
+      summaryChanges: [
+        `أمر الشراء: ${poData.poNumber}`,
+        `المورد: ${poData.vendor}`,
+        `طريقة الشحن: ${poData.shippingMethod}`,
+        `المدة التقديرية: ${poData.slaDays} يوم`,
+      ],
+      ipAddress: '192.168.10.99',
+      severity: 'INFO',
+    });
+
     if (audioSettings.soundEnabled && audioSettings.notifyOnStatusChange) {
       playStatusChangeSound(audioSettings.volume);
     }
@@ -932,6 +1136,7 @@ export default function App() {
 
   // Handle Receiving Delivery
   const handleReceiveDelivery = (orderId: string, receivedBy: string, receivingNotes: string) => {
+    let orderToSync: Order | null = null;
     setOrders((prev) =>
       prev.map((order) => {
         if (order.id !== orderId) return order;
@@ -949,6 +1154,8 @@ export default function App() {
           lastUpdated: new Date().toISOString(),
         };
 
+        orderToSync = updatedOrder;
+
         if (selectedOrder?.id === orderId) {
           setSelectedOrder(updatedOrder);
         }
@@ -959,6 +1166,34 @@ export default function App() {
         return updatedOrder;
       })
     );
+
+    if (orderToSync) {
+      saveOrderToFirestore(orderToSync).catch((err) => {
+        console.warn('Could not sync delivery receipt to Firestore:', err);
+      });
+    }
+
+    const targetOrder = orders.find((o) => o.id === orderId);
+    handleAddAuditLog({
+      userId: activeUser.id,
+      userName: receivedBy,
+      userRole: currentUserRole,
+      action: 'تأكيد استلام الشحنة وتحديث المخزن',
+      category: 'LOGISTICS',
+      target: `الطلب: ${targetOrder?.referenceNumber || orderId}`,
+      orderId,
+      orderReference: targetOrder?.referenceNumber,
+      details: `تم فحص واستلام الشحنة بنجاح في المستودع وتحديث الرصيد المخزني بواسطة [${receivedBy}]. ${
+        receivingNotes ? `ملاحظات الاستلام: ${receivingNotes}` : ''
+      }`,
+      summaryChanges: [
+        `تم الاستلام بواسطة: ${receivedBy}`,
+        receivingNotes ? `ملاحظات الفحص: ${receivingNotes}` : 'المطابقة المخزنية سليمة',
+        'تحديث الأرصدة المخزنية: مكتمل',
+      ],
+      ipAddress: '192.168.10.99',
+      severity: 'INFO',
+    });
 
     if (audioSettings.soundEnabled && audioSettings.notifyOnStatusChange) {
       playStatusChangeSound(audioSettings.volume);
@@ -1243,6 +1478,7 @@ export default function App() {
             onToggleAudioMaster={handleToggleAudioMaster}
             onUpdateAudioSettings={(newSettings) => setAudioSettings(newSettings)}
             onOpenUserSettingsModal={() => setIsSettingsModalOpen(true)}
+            auditLogs={auditLogs}
           />
         )}
 
@@ -1406,6 +1642,7 @@ export default function App() {
           onIssuePO={handleIssuePO}
           onReceiveDelivery={handleReceiveDelivery}
           onOpenPrintView={(ord) => setPrintOrder(ord)}
+          auditLogs={auditLogs}
         />
       )}
 

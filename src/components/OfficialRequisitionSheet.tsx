@@ -11,11 +11,15 @@ import {
   Trash2,
   Edit3,
   Save,
-  X
+  X,
+  Download,
+  Loader2,
 } from 'lucide-react';
 import { Order, OrderItem, OrderStatus } from '../types';
 import { PriorityBadge } from './PriorityBadge';
 import { getPriorityMeta } from '../utils/priority';
+import html2canvas from 'html2canvas-pro';
+import { jsPDF } from 'jspdf';
 
 interface OfficialRequisitionSheetProps {
   order: Order;
@@ -32,6 +36,8 @@ export const OfficialRequisitionSheet: React.FC<OfficialRequisitionSheetProps> =
 }) => {
   const [copied, setCopied] = useState(false);
   const [isEditing, setIsEditing] = useState(false);
+  const [isGeneratingPdf, setIsGeneratingPdf] = useState(false);
+  const [pdfSuccess, setPdfSuccess] = useState(false);
 
   // Local draft state for editing items and metadata manually
   const [draftOrder, setDraftOrder] = useState<Order>(order);
@@ -90,7 +96,162 @@ ${shareUrl}`;
   };
 
   const handlePrint = () => {
+    // Dynamically inject portrait orientation for official requisition sheet
+    const styleId = 'report-print-page-style';
+    let styleEl = document.getElementById(styleId);
+    if (!styleEl) {
+      styleEl = document.createElement('style');
+      styleEl.id = styleId;
+      document.head.appendChild(styleEl);
+    }
+    styleEl.innerHTML = '@media print { @page { size: portrait; margin: 6mm; } }';
+
     window.print();
+  };
+
+  // Direct PDF Download with robust offscreen cloned rendering for pristine multi-page or single-page A4
+  const handleDownloadPdf = async () => {
+    const element = document.getElementById('official-requisition-form');
+    if (!element) return;
+    setIsGeneratingPdf(true);
+    setPdfSuccess(false);
+
+    let cloneContainer: HTMLDivElement | null = null;
+
+    try {
+      // Ensure all web fonts (especially Cairo) are loaded and ready before rendering
+      if (document.fonts && document.fonts.ready) {
+        await document.fonts.ready;
+      }
+
+      // 1. Create a controlled off-screen desktop container (960px width)
+      // This ensures 100% desktop rendering regardless of whether the user is on mobile or desktop,
+      // avoiding layout shrinkage, mobile line wrapping, or clipped borders.
+      cloneContainer = document.createElement('div');
+      cloneContainer.style.position = 'fixed';
+      cloneContainer.style.left = '-9999px';
+      cloneContainer.style.top = '0';
+      cloneContainer.style.width = '960px';
+      cloneContainer.style.zIndex = '-1000';
+      cloneContainer.style.background = '#ffffff';
+      cloneContainer.style.direction = 'rtl';
+
+      // Clone the requisition element
+      const clone = element.cloneNode(true) as HTMLElement;
+      clone.id = 'official-requisition-form-clone';
+      clone.style.width = '960px';
+      clone.style.maxWidth = '960px';
+      clone.style.margin = '0';
+      clone.style.boxShadow = 'none';
+      clone.style.borderRadius = '0';
+      clone.style.border = '2px solid #000000';
+      clone.style.padding = '24px 32px';
+      clone.style.fontFamily = "'Cairo', 'Segoe UI', Tahoma, sans-serif";
+      clone.style.letterSpacing = '0px';
+
+      // Remove any interactive/no-print buttons from the clone
+      const noPrintElements = clone.querySelectorAll('.no-print');
+      noPrintElements.forEach((el) => el.remove());
+
+      cloneContainer.appendChild(clone);
+      document.body.appendChild(cloneContainer);
+
+      // Brief tick to ensure styles and fonts evaluate in the clone
+      await new Promise((resolve) => setTimeout(resolve, 100));
+
+      const canvas = await html2canvas(clone, {
+        scale: 2,
+        useCORS: true,
+        logging: false,
+        backgroundColor: '#ffffff',
+        windowWidth: 1200,
+        scrollX: 0,
+        scrollY: 0,
+        onclone: (clonedDoc) => {
+          // Strictly eliminate any letter-spacing on Arabic texts to prevent disconnected letters
+          const clonedForm = clonedDoc.getElementById('official-requisition-form-clone');
+          if (clonedForm) {
+            clonedForm.style.fontFamily = "'Cairo', 'Segoe UI', Tahoma, sans-serif";
+            clonedForm.style.letterSpacing = '0px';
+            const allElements = clonedForm.querySelectorAll('*');
+            allElements.forEach((node) => {
+              const el = node as HTMLElement;
+              el.style.letterSpacing = 'normal';
+              el.style.wordSpacing = 'normal';
+              // Keep mono font only on digits / codes if necessary, otherwise use Cairo
+              if (!el.classList.contains('font-mono-code')) {
+                el.style.fontFamily = "'Cairo', 'Segoe UI', Tahoma, sans-serif";
+              }
+            });
+          }
+        },
+      });
+
+      const pdf = new jsPDF({
+        orientation: 'portrait',
+        unit: 'mm',
+        format: 'a4',
+      });
+
+      const pdfWidth = 210;
+      const pdfHeight = 297;
+      const margin = 6;
+      const printWidth = pdfWidth - margin * 2;
+      const printHeight = pdfHeight - margin * 2;
+
+      const pageCanvasHeight = Math.floor((canvas.width * printHeight) / printWidth);
+      const totalPages = Math.ceil(canvas.height / pageCanvasHeight) || 1;
+
+      for (let i = 0; i < totalPages; i++) {
+        if (i > 0) {
+          pdf.addPage();
+        }
+
+        const sourceY = i * pageCanvasHeight;
+        const sourceHeight = Math.min(pageCanvasHeight, canvas.height - sourceY);
+
+        const pageCanvas = document.createElement('canvas');
+        pageCanvas.width = canvas.width;
+        pageCanvas.height = sourceHeight;
+
+        const ctx = pageCanvas.getContext('2d');
+        if (ctx) {
+          ctx.fillStyle = '#ffffff';
+          ctx.fillRect(0, 0, pageCanvas.width, pageCanvas.height);
+          ctx.drawImage(
+            canvas,
+            0,
+            sourceY,
+            canvas.width,
+            sourceHeight,
+            0,
+            0,
+            canvas.width,
+            sourceHeight
+          );
+        }
+
+        const pageImgData = pageCanvas.toDataURL('image/jpeg', 0.98);
+        const sliceMmHeight = (sourceHeight * printWidth) / canvas.width;
+
+        pdf.addImage(pageImgData, 'JPEG', margin, margin, printWidth, sliceMmHeight, undefined, 'FAST');
+      }
+
+      const safeRef = order.referenceNumber ? order.referenceNumber.replace(/[^a-zA-Z0-9_\-\u0600-\u06FF]/g, '_') : 'طلب';
+      const filename = `استمارة_طلب_شراء_${safeRef}.pdf`;
+      pdf.save(filename);
+      setPdfSuccess(true);
+      setTimeout(() => setPdfSuccess(false), 4000);
+    } catch (err) {
+      console.error('Error generating requisition PDF:', err);
+      // Fallback to browser standard print dialog if canvas generation fails
+      handlePrint();
+    } finally {
+      if (cloneContainer && cloneContainer.parentNode) {
+        cloneContainer.parentNode.removeChild(cloneContainer);
+      }
+      setIsGeneratingPdf(false);
+    }
   };
 
   // Manual Items Handlers
@@ -148,11 +309,6 @@ ${shareUrl}`;
   const totalRows = 15;
   const currentItems = isEditing ? draftOrder.items : order.items;
   const emptyRowsCount = Math.max(0, totalRows - currentItems.length);
-
-  // Signatures (Fixed as official stamped approvals)
-  const deptApproval = order.approvals?.find((a) => a.stage === 'REQUESTER' || a.stage === 'DEPT_HEAD');
-  const siteApproval = order.approvals?.find((a) => a.stage === 'SITE_MANAGER');
-  const gmApproval = order.approvals?.find((a) => a.stage === 'GENERAL_MANAGER');
 
   return (
     <div className="space-y-4">
@@ -295,14 +451,45 @@ ${shareUrl}`;
               <span>نسخ رابط متابعة الأعضاء (عرض فقط)</span>
             </button>
 
-            {/* Print / PDF */}
+            {/* Direct PDF Download */}
+            <button
+              type="button"
+              onClick={handleDownloadPdf}
+              disabled={isGeneratingPdf}
+              className={`mr-auto font-black text-xs sm:text-sm px-4 py-2.5 rounded-xl transition flex items-center gap-2 shadow-md cursor-pointer ${
+                pdfSuccess
+                  ? 'bg-emerald-600 text-white'
+                  : 'bg-emerald-500 hover:bg-emerald-400 text-slate-950'
+              } disabled:opacity-60 disabled:cursor-not-allowed`}
+              title="تنزيل استمارة الطلب كملف PDF رقمي عالي الدقة مباشرة"
+            >
+              {isGeneratingPdf ? (
+                <>
+                  <Loader2 className="w-4 h-4 animate-spin" />
+                  <span>جارٍ إنشاء PDF...</span>
+                </>
+              ) : pdfSuccess ? (
+                <>
+                  <Check className="w-4 h-4" />
+                  <span>تم التنزيل بنجاح!</span>
+                </>
+              ) : (
+                <>
+                  <Download className="w-4 h-4" />
+                  <span>تنزيل استمارة PDF</span>
+                </>
+              )}
+            </button>
+
+            {/* Native Browser Print / PDF */}
             <button
               type="button"
               onClick={handlePrint}
-              className="mr-auto bg-amber-500 hover:bg-amber-400 text-slate-950 font-black text-xs sm:text-sm px-4 py-2.5 rounded-xl transition flex items-center gap-2 shadow-md cursor-pointer"
+              className="bg-amber-500 hover:bg-amber-400 text-slate-950 font-black text-xs sm:text-sm px-4 py-2.5 rounded-xl transition flex items-center gap-2 shadow-md cursor-pointer"
+              title="فتح نافذة الطباعة أو الحفظ كـ PDF"
             >
               <Printer className="w-4 h-4" />
-              <span>طباعة الاستمارة (Print / PDF)</span>
+              <span>طباعة (Print)</span>
             </button>
           </div>
         </div>
@@ -317,13 +504,13 @@ ${shareUrl}`;
         {/* Rubber Stamp Watermark indicating status (Simplified: قيد التنفيذ أو تم التنفيذ) */}
         <div className="absolute top-28 left-8 sm:left-14 pointer-events-none opacity-85 rotate-[-12deg] z-10 select-none">
           <div
-            className={`border-4 rounded-xl px-4 py-2 text-center font-black tracking-widest shadow-sm ${
+            className={`border-4 rounded-xl px-4 py-2 text-center font-black shadow-sm ${
               isCompleted
                 ? 'border-emerald-700 text-emerald-700 bg-emerald-50/70'
                 : 'border-amber-600 text-amber-700 bg-amber-50/70'
             }`}
           >
-            <div className="text-[10px] uppercase font-mono tracking-widest">
+            <div className="text-[10px] uppercase font-bold">
               مشروع الجكوب للتعدين • ELJAKOB
             </div>
             <div className="text-base sm:text-lg font-black my-0.5">
@@ -355,11 +542,8 @@ ${shareUrl}`;
               <line x1="38" y1="40" x2="52" y2="35" stroke="#1e293b" strokeWidth="2" />
               <circle cx="48" cy="46" r="2" fill="#fbbf24" stroke="#78350f" strokeWidth="0.5" />
               <circle cx="56" cy="44" r="2.5" fill="#fbbf24" stroke="#78350f" strokeWidth="0.5" />
-              <path id="curveTopR" d="M 20 50 A 30 30 0 0 1 80 50" fill="none" />
-              <text fontSize="6" fontWeight="900" fill="#78350f">
-                <textPath href="#curveTopR" startOffset="50%" textAnchor="middle">
-                  مشروع الجكوب للتعدين
-                </textPath>
+              <text x="50" y="24" textAnchor="middle" fontSize="6.5" fontWeight="900" fill="#78350f">
+                مشروع الجكوب للتعدين
               </text>
             </svg>
             <span className="text-[8px] sm:text-[9px] font-black text-slate-900 leading-tight mt-0.5">
@@ -372,10 +556,10 @@ ${shareUrl}`;
 
           {/* Center Main Titles */}
           <div className="text-center flex-1">
-            <h1 className="text-xl sm:text-3xl font-black text-slate-950 tracking-tight font-serif">
+            <h1 className="text-xl sm:text-3xl font-black text-slate-950 font-sans">
               مشروع الجكوب للتعدين
             </h1>
-            <h2 className="text-xs sm:text-base font-extrabold text-slate-900 tracking-wider font-mono uppercase mt-0.5">
+            <h2 className="text-xs sm:text-base font-extrabold text-slate-900 font-sans uppercase mt-0.5">
               ELJAKOB FOR MINING PROJECT
             </h2>
           </div>
@@ -398,11 +582,8 @@ ${shareUrl}`;
               <line x1="38" y1="40" x2="52" y2="35" stroke="#1e293b" strokeWidth="2" />
               <circle cx="48" cy="46" r="2" fill="#fbbf24" stroke="#78350f" strokeWidth="0.5" />
               <circle cx="56" cy="44" r="2.5" fill="#fbbf24" stroke="#78350f" strokeWidth="0.5" />
-              <path id="curveTopL" d="M 20 50 A 30 30 0 0 1 80 50" fill="none" />
-              <text fontSize="6" fontWeight="900" fill="#78350f">
-                <textPath href="#curveTopL" startOffset="50%" textAnchor="middle">
-                  مشروع الجكوب للتعدين
-                </textPath>
+              <text x="50" y="24" textAnchor="middle" fontSize="6.5" fontWeight="900" fill="#78350f">
+                مشروع الجكوب للتعدين
               </text>
             </svg>
             <span className="text-[8px] sm:text-[9px] font-black text-slate-900 leading-tight mt-0.5">
@@ -416,7 +597,7 @@ ${shareUrl}`;
 
         {/* Yellow Sub-Banner: "طـــــلـــــب شــــــــــــــراء" */}
         <div className="my-2 border-2 border-black bg-[#fef08a] py-1.5 text-center">
-          <h2 className="text-base sm:text-xl font-black text-black tracking-[0.3em] sm:tracking-[0.5em]">
+          <h2 className="text-base sm:text-xl font-black text-black">
             طــــــــــــلــــــــــــب شــــــــــــــــــــــــــــراء
           </h2>
         </div>
@@ -630,14 +811,14 @@ ${shareUrl}`;
                   </td>
 
                   {/* المواصفات */}
-                  <td className="p-1 sm:p-1.5 border-l border-black text-center font-mono font-bold tracking-wider">
+                  <td className="p-1 sm:p-1.5 border-l border-black text-center font-bold text-xs sm:text-sm text-slate-950 leading-snug">
                     {isEditing ? (
                       <input
                         type="text"
                         value={item.technicalSpecs}
                         onChange={(e) => handleItemChange(idx, 'technicalSpecs', e.target.value)}
                         placeholder="المواصفات أو رقم القطعة..."
-                        className="w-full text-center border border-amber-400 rounded px-1 py-0.5 text-xs font-mono font-bold"
+                        className="w-full text-center border border-amber-400 rounded px-1 py-0.5 text-xs font-bold"
                       />
                     ) : (
                       <span>{item.technicalSpecs}</span>
@@ -660,14 +841,14 @@ ${shareUrl}`;
                   </td>
 
                   {/* الوحدة */}
-                  <td className="p-1 sm:p-1.5 border-l border-black text-center">
+                  <td className="p-1 sm:p-1.5 border-l border-black text-center font-bold text-slate-900">
                     {isEditing ? (
                       <input
                         type="text"
                         value={item.unit}
                         onChange={(e) => handleItemChange(idx, 'unit', e.target.value)}
                         placeholder="الوحدة..."
-                        className="w-full text-center border border-amber-400 rounded px-1 py-0.5 text-xs"
+                        className="w-full text-center border border-amber-400 rounded px-1 py-0.5 text-xs font-bold"
                       />
                     ) : (
                       <span>{item.unit}</span>
@@ -675,14 +856,14 @@ ${shareUrl}`;
                   </td>
 
                   {/* ملاحظات */}
-                  <td className="p-1 sm:p-1.5 text-center text-[11px] sm:text-xs text-slate-800 font-semibold">
+                  <td className="p-1 sm:p-1.5 text-center text-xs text-slate-800 font-bold leading-snug">
                     {isEditing ? (
                       <input
                         type="text"
                         value={item.notes || ''}
                         onChange={(e) => handleItemChange(idx, 'notes', e.target.value)}
                         placeholder="ملاحظات أو اسم المعدة..."
-                        className="w-full text-center border border-amber-400 rounded px-1 py-0.5 text-xs"
+                        className="w-full text-center border border-amber-400 rounded px-1 py-0.5 text-xs font-bold"
                       />
                     ) : (
                       <span>{item.notes || '-'}</span>
@@ -724,121 +905,6 @@ ${shareUrl}`;
               })}
             </tbody>
           </table>
-        </div>
-
-        {/* Signatures & Approvals Table (Permanent official certified format) */}
-        <div className="border-2 border-black text-xs sm:text-sm font-sans">
-          {/* Header Row: Approvers */}
-          <div className="grid grid-cols-12 border-b border-black bg-[#fef08a] font-black text-center">
-            <div className="col-span-3 sm:col-span-2 p-1.5 border-l border-black">
-              {/* Labels Column Header */}
-            </div>
-            <div className="col-span-3 sm:col-span-3 p-1.5 border-l border-black">
-              <span>اعتماد رئيس القسم</span>
-            </div>
-            <div className="col-span-3 sm:col-span-4 p-1.5 border-l border-black">
-              <span>اعتماد مدير الموقع</span>
-            </div>
-            <div className="col-span-3 sm:col-span-3 p-1.5">
-              <span>تصديق المدير العام</span>
-            </div>
-          </div>
-
-          {/* Row 1: Name (الإســـــــــــــــــــــــم) */}
-          <div className="grid grid-cols-12 border-b border-black text-center font-bold">
-            <div className="col-span-3 sm:col-span-2 bg-[#fef08a] border-l border-black p-1.5 flex items-center justify-center font-black">
-              <span>الإســـــــــــــــــــــــم</span>
-            </div>
-            <div className="col-span-3 sm:col-span-3 border-l border-black p-1.5 flex items-center justify-center">
-              <span>{deptApproval?.approverName || 'مصطفى يعقوب'}</span>
-            </div>
-            <div className="col-span-3 sm:col-span-4 border-l border-black p-1.5 flex items-center justify-center">
-              <span>{siteApproval?.approverName || 'أحمد الناير'}</span>
-            </div>
-            <div className="col-span-3 sm:col-span-3 p-1.5 flex items-center justify-center">
-              <span>{gmApproval?.approverName || 'طارق صالح'}</span>
-            </div>
-          </div>
-
-          {/* Row 2: Title / Job (الوظيفـــــــــــــــــــة) */}
-          <div className="grid grid-cols-12 border-b border-black text-center font-bold">
-            <div className="col-span-3 sm:col-span-2 bg-[#fef08a] border-l border-black p-1.5 flex items-center justify-center font-black">
-              <span>الوظيفـــــــــــــــــــة</span>
-            </div>
-            <div className="col-span-3 sm:col-span-3 border-l border-black p-1.5 flex items-center justify-center text-xs">
-              <span>فني صيانة</span>
-            </div>
-            <div className="col-span-3 sm:col-span-4 border-l border-black p-1.5 flex items-center justify-center text-xs">
-              <span>مدير الموقع المكلف</span>
-            </div>
-            <div className="col-span-3 sm:col-span-3 p-1.5 flex items-center justify-center text-xs">
-              <span>المدير العام</span>
-            </div>
-          </div>
-
-          {/* Row 3: Date (التاريـــــــــــــــــــــخ) */}
-          <div className="grid grid-cols-12 border-b border-black text-center font-mono font-bold text-xs sm:text-sm">
-            <div className="col-span-3 sm:col-span-2 bg-[#fef08a] border-l border-black p-1.5 flex items-center justify-center font-black font-sans">
-              <span>التاريـــــــــــــــــــــخ</span>
-            </div>
-            <div className="col-span-3 sm:col-span-3 border-l border-black p-1.5 flex items-center justify-center">
-              <span>{order.orderDate}م</span>
-            </div>
-            <div className="col-span-3 sm:col-span-4 border-l border-black p-1.5 flex items-center justify-center">
-              <span>{order.orderDate}م</span>
-            </div>
-            <div className="col-span-3 sm:col-span-3 p-1.5 flex items-center justify-center">
-              <span>2026/09/08م</span>
-            </div>
-          </div>
-
-          {/* Row 4: Signature (التوقيـــــــــــــــــــــع) */}
-          <div className="grid grid-cols-12 text-center h-20 sm:h-24">
-            <div className="col-span-3 sm:col-span-2 bg-[#fef08a] border-l border-black p-1.5 flex items-center justify-center font-black">
-              <span>التوقيـــــــــــــــــــــع</span>
-            </div>
-
-            {/* Dept Head Signature (MUSTAFS) */}
-            <div className="col-span-3 sm:col-span-3 border-l border-black p-2 flex flex-col items-center justify-center">
-              <span className="font-mono text-base sm:text-lg font-black tracking-widest text-slate-800">
-                MUSTAFS
-              </span>
-              <span className="text-[9px] text-slate-500 mt-1">توقيع معتمد</span>
-            </div>
-
-            {/* Site Manager Signature (Handwritten Ahmed Thayer) */}
-            <div className="col-span-3 sm:col-span-4 border-l border-black p-2 flex flex-col items-center justify-center">
-              <svg viewBox="0 0 160 60" className="w-28 sm:w-36 h-12">
-                <path
-                  d="M15,45 Q30,10 45,35 T75,25 Q95,50 115,20 T145,35"
-                  fill="none"
-                  stroke="#1e293b"
-                  strokeWidth="2.5"
-                  strokeLinecap="round"
-                />
-                <path
-                  d="M25,25 L50,45 M65,15 Q80,45 105,40"
-                  fill="none"
-                  stroke="#1e293b"
-                  strokeWidth="2"
-                  strokeLinecap="round"
-                />
-                <text x="35" y="55" fontSize="14" fontStyle="italic" fontWeight="bold" fill="#0f172a" fontFamily="cursive">
-                  Ahmed Thayer
-                </text>
-              </svg>
-            </div>
-
-            {/* GM Signature & Stamp */}
-            <div className="col-span-3 sm:col-span-3 p-2 flex flex-col items-center justify-center">
-              <div className="border border-slate-700 rounded px-2 py-0.5 text-[10px] font-bold text-slate-800 bg-slate-50">
-                مصدق - الإدارة العامة
-              </div>
-              <span className="text-xs font-serif font-bold text-slate-900 mt-1">
-                طارق صالح
-              </span>
-            </div>
-          </div>
         </div>
 
         {/* Footer info & Direct Link URL */}

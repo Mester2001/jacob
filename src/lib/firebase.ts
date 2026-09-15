@@ -20,7 +20,7 @@ import {
   onAuthStateChanged,
   type User as FirebaseUser,
 } from 'firebase/auth';
-import { Order } from '../types';
+import { Order, AuditLogEntry } from '../types';
 import firebaseConfig from '../../firebase-applet-config.json';
 
 // Initialize Firebase App
@@ -416,4 +416,64 @@ export async function seedInitialOrdersIfEmpty(sampleOrders: Order[]): Promise<v
     console.warn('Could not seed initial orders to Firestore:', error);
   }
 }
+
+/**
+ * Save an audit log entry to Firestore
+ */
+export async function saveAuditLogToFirestore(log: AuditLogEntry): Promise<void> {
+  try {
+    const logRef = doc(db, 'audit_logs', log.id);
+    await setDoc(logRef, log, { merge: true });
+  } catch (error) {
+    if (isPermissionError(error)) {
+      handleFirestoreError(error, OperationType.WRITE, `audit_logs/${log.id}`);
+    }
+    console.warn('Could not sync audit log to Firestore:', error);
+  }
+}
+
+/**
+ * Fetch audit logs directly from Firestore
+ */
+export async function fetchAuditLogsFromFirestore(): Promise<AuditLogEntry[]> {
+  try {
+    const logsCol = collection(db, 'audit_logs');
+    const snap = await getDocs(logsCol);
+    const logs: AuditLogEntry[] = [];
+    snap.forEach((d) => logs.push(d.data() as AuditLogEntry));
+    logs.sort((a, b) => (b.timestamp || '').localeCompare(a.timestamp || ''));
+    return logs;
+  } catch (error) {
+    console.warn('Could not fetch audit logs from Firestore:', error);
+    return [];
+  }
+}
+
+/**
+ * Real-time subscription to audit logs
+ */
+export function subscribeToAuditLogs(
+  onLogsReceived: (logs: AuditLogEntry[]) => void,
+  onError?: (error: any) => void
+): () => void {
+  try {
+    const logsCol = collection(db, 'audit_logs');
+    return onSnapshot(
+      logsCol,
+      (snap) => {
+        const logs: AuditLogEntry[] = [];
+        snap.forEach((d) => logs.push(d.data() as AuditLogEntry));
+        logs.sort((a, b) => (b.timestamp || '').localeCompare(a.timestamp || ''));
+        onLogsReceived(logs);
+      },
+      (error) => {
+        if (onError) onError(error);
+      }
+    );
+  } catch (err) {
+    console.warn('Failed to subscribe to audit logs:', err);
+    return () => {};
+  }
+}
+
 

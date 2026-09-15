@@ -17,7 +17,7 @@ import {
 } from 'lucide-react';
 import { Order, Site, Department, OrderStatus } from '../types';
 import { getPriorityMeta, normalizePriority } from '../utils/priority';
-import html2canvas from 'html2canvas';
+import html2canvas from 'html2canvas-pro';
 import { jsPDF } from 'jspdf';
 
 interface OrdersReportPdfModalProps {
@@ -141,6 +141,11 @@ export const OrdersReportPdfModal: React.FC<OrdersReportPdfModalProps> = ({
     try {
       const element = reportRef.current;
 
+      // Ensure fonts are completely ready before generating canvas
+      if (document.fonts && document.fonts.ready) {
+        await document.fonts.ready;
+      }
+
       // Render the report element at 2x scale for crisp, sharp text
       const canvas = await html2canvas(element, {
         scale: 2,
@@ -148,9 +153,23 @@ export const OrdersReportPdfModal: React.FC<OrdersReportPdfModalProps> = ({
         logging: false,
         backgroundColor: '#ffffff',
         windowWidth: 1280,
+        scrollX: 0,
+        scrollY: 0,
+        onclone: (clonedDoc) => {
+          const reportEl = clonedDoc.getElementById('printable-orders-report');
+          if (reportEl) {
+            reportEl.style.fontFamily = "'Cairo', 'Segoe UI', Tahoma, sans-serif";
+            const allElements = reportEl.querySelectorAll('*');
+            allElements.forEach((node) => {
+              const el = node as HTMLElement;
+              el.style.letterSpacing = '0px';
+              if (!el.classList.contains('font-mono')) {
+                el.style.fontFamily = "'Cairo', 'Segoe UI', Tahoma, sans-serif";
+              }
+            });
+          }
+        },
       });
-
-      const imgData = canvas.toDataURL('image/jpeg', 0.98);
 
       // A4 Landscape: 297mm x 210mm
       const pdf = new jsPDF({
@@ -161,23 +180,57 @@ export const OrdersReportPdfModal: React.FC<OrdersReportPdfModalProps> = ({
 
       const pdfWidth = 297;
       const pdfHeight = 210;
-      const canvasWidth = canvas.width;
-      const canvasHeight = canvas.height;
-      const imgHeight = (canvasHeight * pdfWidth) / canvasWidth;
+      const margin = 6;
+      const printWidth = pdfWidth - margin * 2;
+      const printHeight = pdfHeight - margin * 2;
 
-      let heightLeft = imgHeight;
-      let position = 0;
+      // Pixel height corresponding to one PDF page's printable height:
+      const pageCanvasHeight = Math.floor((canvas.width * printHeight) / printWidth);
+      const totalPages = Math.ceil(canvas.height / pageCanvasHeight) || 1;
 
-      // First page
-      pdf.addImage(imgData, 'JPEG', 0, position, pdfWidth, imgHeight, undefined, 'FAST');
-      heightLeft -= pdfHeight;
+      for (let i = 0; i < totalPages; i++) {
+        if (i > 0) {
+          pdf.addPage();
+        }
 
-      // Additional pages if needed
-      while (heightLeft > 0) {
-        position = heightLeft - imgHeight;
-        pdf.addPage();
-        pdf.addImage(imgData, 'JPEG', 0, position, pdfWidth, imgHeight, undefined, 'FAST');
-        heightLeft -= pdfHeight;
+        const sourceY = i * pageCanvasHeight;
+        const sourceHeight = Math.min(pageCanvasHeight, canvas.height - sourceY);
+
+        // Create a temporary canvas for this page slice
+        const pageCanvas = document.createElement('canvas');
+        pageCanvas.width = canvas.width;
+        pageCanvas.height = sourceHeight;
+
+        const ctx = pageCanvas.getContext('2d');
+        if (ctx) {
+          ctx.fillStyle = '#ffffff';
+          ctx.fillRect(0, 0, pageCanvas.width, pageCanvas.height);
+          ctx.drawImage(
+            canvas,
+            0,
+            sourceY,
+            canvas.width,
+            sourceHeight,
+            0,
+            0,
+            canvas.width,
+            sourceHeight
+          );
+        }
+
+        const pageImgData = pageCanvas.toDataURL('image/jpeg', 0.98);
+        const sliceMmHeight = (sourceHeight * printWidth) / canvas.width;
+
+        pdf.addImage(
+          pageImgData,
+          'JPEG',
+          margin,
+          margin,
+          printWidth,
+          sliceMmHeight,
+          undefined,
+          'FAST'
+        );
       }
 
       const filename = `تقرير_طلبات_الشراء_الميدانية_${generationDate.isoDate}.pdf`;
@@ -191,10 +244,10 @@ export const OrdersReportPdfModal: React.FC<OrdersReportPdfModalProps> = ({
       }
     } catch (err) {
       console.error('Error generating PDF report:', err);
-      // Fallback: trigger browser print
-      window.print();
+      // Fallback: trigger browser print with landscape orientation
+      handlePrint();
       if (onShowToast) {
-        onShowToast('تم فتح نافذة الطباعة والحفظ كـ PDF للمتصفح', 'info');
+        onShowToast('تم فتح نافذة الطباعة والحفظ كـ PDF للمتصفح كبديل فوري', 'info');
       }
     } finally {
       setIsGenerating(false);
@@ -203,6 +256,16 @@ export const OrdersReportPdfModal: React.FC<OrdersReportPdfModalProps> = ({
 
   // Native Print / Save as PDF
   const handlePrint = () => {
+    // Dynamically inject print landscape style for the orders ledger
+    const styleId = 'report-print-page-style';
+    let styleEl = document.getElementById(styleId);
+    if (!styleEl) {
+      styleEl = document.createElement('style');
+      styleEl.id = styleId;
+      document.head.appendChild(styleEl);
+    }
+    styleEl.innerHTML = '@media print { @page { size: landscape; margin: 6mm; } }';
+
     window.print();
   };
 
@@ -210,11 +273,11 @@ export const OrdersReportPdfModal: React.FC<OrdersReportPdfModalProps> = ({
 
   return (
     <div
-      className="fixed inset-0 bg-slate-950/80 backdrop-blur-xs flex items-center justify-center z-50 p-2 sm:p-4 overflow-y-auto animate-fadeIn"
+      className="fixed inset-0 bg-slate-950/80 backdrop-blur-xs flex items-center justify-center z-50 p-2 sm:p-4 overflow-y-auto animate-fadeIn print:static print:inset-auto print:bg-transparent print:backdrop-blur-none print:p-0 print:m-0 print:overflow-visible print:z-auto"
       dir="rtl"
       id="orders-report-pdf-modal"
     >
-      <div className="bg-slate-100 rounded-2xl w-full max-w-6xl shadow-2xl overflow-hidden my-auto max-h-[96vh] flex flex-col border border-slate-700">
+      <div className="bg-slate-100 rounded-2xl w-full max-w-6xl shadow-2xl overflow-hidden my-auto max-h-[96vh] flex flex-col border border-slate-700 print:max-h-none print:h-auto print:overflow-visible print:bg-transparent print:border-none print:shadow-none print:rounded-none print:w-full print:max-w-none">
         {/* Top Control Bar (Non-printable) */}
         <div className="bg-slate-900 text-white px-4 sm:px-6 py-3.5 flex flex-col sm:flex-row sm:items-center justify-between gap-3 no-print shrink-0 border-b border-slate-800">
           <div className="flex items-center gap-2.5">
@@ -313,12 +376,13 @@ export const OrdersReportPdfModal: React.FC<OrdersReportPdfModalProps> = ({
         </div>
 
         {/* Scrollable Container with Printable Document Preview */}
-        <div className="p-3 sm:p-6 overflow-y-auto bg-slate-200/90 flex-1">
+        <div className="p-3 sm:p-6 overflow-y-auto bg-slate-200/90 flex-1 print:p-0 print:bg-transparent print:overflow-visible">
           {/* Printable A4 Landscape Document */}
           <div
             ref={reportRef}
-            className="bg-white text-slate-900 rounded-xl shadow-lg p-6 sm:p-8 mx-auto border border-slate-300 print:border-none print:shadow-none print:p-4 min-w-[980px] max-w-5xl"
-            style={{ width: '100%', minWidth: '1020px' }}
+            id="orders-report-printable-area"
+            className="bg-white text-slate-900 rounded-xl shadow-lg p-6 sm:p-8 mx-auto border border-slate-300 print:border-none print:shadow-none print:p-0 print:m-0 print:rounded-none min-w-[980px] max-w-5xl print:min-w-0 print:w-full print:max-w-none"
+            style={{ width: '100%' }}
           >
             {/* Document Header */}
             <div className="border-b-2 border-slate-900 pb-5 mb-5">

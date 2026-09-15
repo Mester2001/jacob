@@ -45,6 +45,30 @@
         "createdAt": { "type": "string" }
       },
       "required": ["uid", "email", "role"]
+    },
+    "AuditLog": {
+      "title": "AuditLog",
+      "description": "Comprehensive security and operational audit trail including item modifications, content diffs, approvals, and status transitions",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "timestamp": { "type": "string" },
+        "userId": { "type": "string" },
+        "userName": { "type": "string" },
+        "userRole": { "type": "string" },
+        "action": { "type": "string" },
+        "target": { "type": "string" },
+        "details": { "type": "string" },
+        "ipAddress": { "type": "string" },
+        "severity": { "type": "string" },
+        "category": { "type": "string" },
+        "orderId": { "type": "string" },
+        "orderReference": { "type": "string" },
+        "itemChanges": { "type": "array" },
+        "fieldDiffs": { "type": "array" },
+        "summaryChanges": { "type": "array" }
+      },
+      "required": ["id", "timestamp", "action", "details"]
     }
   },
   "firestore": {
@@ -55,6 +79,10 @@
     "/users/{userId}": {
       "schema": "UserProfile",
       "description": "User profiles tracking authenticated users, roles, and site affiliations"
+    },
+    "/audit_logs/{logId}": {
+      "schema": "AuditLog",
+      "description": "Immutable procurement audit records tracking order content alterations and stage changes"
     }
   }
 }

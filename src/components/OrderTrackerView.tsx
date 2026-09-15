@@ -34,11 +34,15 @@ import {
   Radio,
   Zap,
   RotateCcw,
+  History,
+  ChevronDown,
+  ChevronUp,
 } from 'lucide-react';
-import { Order, OrderStatus, UserRole, UserAudioSettings } from '../types';
+import { Order, OrderStatus, UserRole, UserAudioSettings, AuditLogEntry } from '../types';
 import { getLifecycleCategory } from '../utils/statusLifecycle';
 import { PriorityBadge } from './PriorityBadge';
 import { OfficialRequisitionSheet } from './OfficialRequisitionSheet';
+import { AuditModificationDetails } from './AuditModificationDetails';
 import { subscribeToOrderById } from '../lib/firebase';
 import { playStatusChangeSound, playNewOrderSound, playTestAudio } from '../utils/audioNotifications';
 import {
@@ -80,6 +84,7 @@ interface OrderTrackerViewProps {
   onToggleAudioMaster?: () => void;
   onUpdateAudioSettings?: (settings: UserAudioSettings) => void;
   onOpenUserSettingsModal?: () => void;
+  auditLogs?: AuditLogEntry[];
 }
 
 export const OrderTrackerView: React.FC<OrderTrackerViewProps> = ({
@@ -102,11 +107,13 @@ export const OrderTrackerView: React.FC<OrderTrackerViewProps> = ({
   onToggleAudioMaster,
   onUpdateAudioSettings,
   onOpenUserSettingsModal,
+  auditLogs = [],
 }) => {
   const [copied, setCopied] = useState(false);
   const [searchTerm, setSearchTerm] = useState('');
   const [searchError, setSearchError] = useState('');
   const [activeViewMode, setActiveViewMode] = useState<'SHEET' | 'STEPPER'>('SHEET');
+  const [isAuditTrailOpen, setIsAuditTrailOpen] = useState(false);
 
   // Current order to display
   const currentOrder = activeOrder || orders[0];
@@ -1389,6 +1396,134 @@ export const OrderTrackerView: React.FC<OrderTrackerViewProps> = ({
               </table>
             </div>
           </div>
+        </div>
+      )}
+
+      {/* Order Audit Trail & Modification History for Current Order */}
+      {currentOrder && (
+        <div className="bg-white rounded-2xl border border-slate-200 shadow-xs overflow-hidden">
+          <button
+            type="button"
+            onClick={() => setIsAuditTrailOpen((prev) => !prev)}
+            className="w-full bg-slate-50/80 hover:bg-slate-100/80 px-6 py-4 border-b border-slate-200 flex items-center justify-between transition cursor-pointer text-right"
+          >
+            <div className="flex items-center gap-3">
+              <div className="w-9 h-9 rounded-xl bg-amber-500/20 text-amber-900 flex items-center justify-center">
+                <History className="w-5 h-5 text-amber-700" />
+              </div>
+              <div>
+                <h4 className="text-sm font-extrabold text-slate-900 flex items-center gap-2">
+                  <span>سجل التدقيق والتعديلات الفنية لهذا الطلب</span>
+                  <span className="bg-amber-100 text-amber-900 text-[11px] font-mono font-bold px-2.5 py-0.5 rounded-full border border-amber-300">
+                    {
+                      auditLogs.filter(
+                        (l) =>
+                          l.orderId === currentOrder.id ||
+                          (currentOrder.referenceNumber &&
+                            l.orderReference === currentOrder.referenceNumber) ||
+                          (currentOrder.referenceNumber &&
+                            l.target.includes(currentOrder.referenceNumber))
+                      ).length
+                    }{' '}
+                    عملية موثقة
+                  </span>
+                </h4>
+                <p className="text-xs text-slate-500">
+                  تتبع دقيق لكافة التعديلات التي طرأت على أصناف الطلب ومواصفاته واعتماداته
+                </p>
+              </div>
+            </div>
+
+            <div className="flex items-center gap-2 text-xs font-bold text-slate-600">
+              <span>{isAuditTrailOpen ? 'طي السجل' : 'عرض التفاصيل والتعديلات'}</span>
+              {isAuditTrailOpen ? (
+                <ChevronUp className="w-4 h-4 text-slate-500" />
+              ) : (
+                <ChevronDown className="w-4 h-4 text-slate-500" />
+              )}
+            </div>
+          </button>
+
+          {isAuditTrailOpen && (
+            <div className="p-5 space-y-3">
+              {(() => {
+                const relevantLogs = auditLogs.filter(
+                  (l) =>
+                    l.orderId === currentOrder.id ||
+                    (currentOrder.referenceNumber &&
+                      l.orderReference === currentOrder.referenceNumber) ||
+                    (currentOrder.referenceNumber &&
+                      l.target.includes(currentOrder.referenceNumber))
+                );
+
+                if (relevantLogs.length === 0) {
+                  return (
+                    <div className="text-center py-6 bg-slate-50 rounded-xl border border-dashed border-slate-200 text-xs text-slate-500">
+                      لم يتم تسجيل أي تعديلات سابقة على أصناف أو حالة هذا الطلب حتى الآن.
+                    </div>
+                  );
+                }
+
+                return (
+                  <div className="space-y-3">
+                    {relevantLogs.map((log) => {
+                      const isContentMod =
+                        log.category === 'CONTENT_MODIFICATION' ||
+                        Boolean(log.itemChanges && log.itemChanges.length > 0) ||
+                        Boolean(log.fieldDiffs && log.fieldDiffs.length > 0);
+
+                      return (
+                        <div
+                          key={log.id}
+                          className={`p-4 rounded-xl border transition ${
+                            isContentMod
+                              ? 'bg-amber-50/40 border-amber-200'
+                              : 'bg-slate-50 border-slate-200'
+                          }`}
+                        >
+                          <div className="flex flex-wrap items-center justify-between gap-2 mb-2">
+                            <div className="flex items-center gap-2">
+                              <span
+                                className={`text-[10px] font-black px-2 py-0.5 rounded-md ${
+                                  isContentMod
+                                    ? 'bg-amber-500 text-slate-950'
+                                    : log.category === 'APPROVAL'
+                                    ? 'bg-emerald-100 text-emerald-800'
+                                    : log.category === 'STATUS_CHANGE'
+                                    ? 'bg-blue-100 text-blue-800'
+                                    : 'bg-slate-200 text-slate-700'
+                                }`}
+                              >
+                                {log.action}
+                              </span>
+                              <span className="text-xs font-bold text-slate-800">
+                                {log.userName}
+                              </span>
+                              <span className="text-[10px] text-slate-500">({log.userRole})</span>
+                            </div>
+
+                            <span className="text-[10px] text-slate-400 font-mono" dir="ltr">
+                              {log.timestamp}
+                            </span>
+                          </div>
+
+                          <p className="text-xs text-slate-700 mb-2 leading-relaxed">{log.details}</p>
+
+                          {(log.itemChanges?.length ||
+                            log.fieldDiffs?.length ||
+                            log.summaryChanges?.length) ? (
+                            <div className="mt-2 pt-2 border-t border-slate-200/70">
+                              <AuditModificationDetails log={log} />
+                            </div>
+                          ) : null}
+                        </div>
+                      );
+                    })}
+                  </div>
+                );
+              })()}
+            </div>
+          )}
         </div>
       )}
     </>

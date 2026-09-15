@@ -87,6 +87,32 @@ export interface AppUser {
   customPermissions?: PermissionAction[];
 }
 
+export type AuditLogCategory =
+  | 'CONTENT_MODIFICATION'
+  | 'STATUS_CHANGE'
+  | 'ORDER_CREATION'
+  | 'APPROVAL'
+  | 'LOGISTICS'
+  | 'TASK_LOCK'
+  | 'SECURITY';
+
+export interface AuditFieldDiff {
+  field: string;
+  fieldLabel: string;
+  oldValue: string | number | null;
+  newValue: string | number | null;
+}
+
+export interface AuditItemChange {
+  changeType: 'ADDED' | 'REMOVED' | 'MODIFIED';
+  itemNumber?: number;
+  itemName: string;
+  specs?: string;
+  quantity?: number;
+  unit?: string;
+  diffs?: AuditFieldDiff[];
+}
+
 export interface AuditLogEntry {
   id: string;
   timestamp: string;
@@ -98,6 +124,12 @@ export interface AuditLogEntry {
   details: string;
   ipAddress: string;
   severity: 'INFO' | 'WARNING' | 'CRITICAL' | 'SECURITY';
+  category?: AuditLogCategory;
+  orderId?: string;
+  orderReference?: string;
+  itemChanges?: AuditItemChange[];
+  fieldDiffs?: AuditFieldDiff[];
+  summaryChanges?: string[];
 }
 
 export interface Site {

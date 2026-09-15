@@ -17,17 +17,22 @@ import {
   Layers,
   ArrowRight,
   ExternalLink,
+  History,
+  FileDiff,
+  Tag,
 } from 'lucide-react';
-import { Order, UserRole, RoleDefinition, AppUser } from '../types';
+import { Order, UserRole, RoleDefinition, AppUser, AuditLogEntry } from '../types';
 import { DigitalSignaturePad } from './DigitalSignaturePad';
 import { hasUserPermission, DEFAULT_ROLES } from '../data/permissionsData';
 import { PriorityBadge } from './PriorityBadge';
+import { AuditModificationDetails } from './AuditModificationDetails';
 
 interface OrderDetailsModalProps {
   order: Order;
   currentUserRole: UserRole;
   roles?: RoleDefinition[];
   activeUser?: AppUser;
+  auditLogs?: AuditLogEntry[];
   onNavigateToPermissions?: () => void;
   onClose: () => void;
   onApprove: (
@@ -52,6 +57,7 @@ export const OrderDetailsModal: React.FC<OrderDetailsModalProps> = ({
   currentUserRole,
   roles = DEFAULT_ROLES,
   activeUser,
+  auditLogs = [],
   onNavigateToPermissions,
   onClose,
   onApprove,
@@ -883,6 +889,114 @@ export const OrderDetailsModal: React.FC<OrderDetailsModalProps> = ({
               )}
             </div>
           )}
+
+          {/* Dedicated Order Audit Trail & Content Modifications Section */}
+          <div className="bg-slate-50 border border-slate-200 rounded-xl p-4 sm:p-5 space-y-4">
+            <div className="flex items-center justify-between border-b border-slate-200 pb-3">
+              <div className="flex items-center gap-2">
+                <div className="w-8 h-8 rounded-lg bg-amber-500/20 text-amber-800 flex items-center justify-center">
+                  <History className="w-4 h-4 text-amber-600" />
+                </div>
+                <div>
+                  <h4 className="text-sm font-extrabold text-slate-900 flex items-center gap-2">
+                    <span>سجل التدقيق والتعديلات الفنية للطلب</span>
+                    <span className="bg-slate-200 text-slate-700 text-[11px] font-mono font-bold px-2 py-0.5 rounded-full">
+                      {
+                        auditLogs.filter(
+                          (l) =>
+                            l.orderId === order.id ||
+                            (order.referenceNumber && l.orderReference === order.referenceNumber) ||
+                            (order.referenceNumber && l.target.includes(order.referenceNumber))
+                        ).length
+                      }{' '}
+                      عملية موثقة
+                    </span>
+                  </h4>
+                  <p className="text-[11px] text-slate-500">
+                    توثيق كامل لكل تعديل طرأ على أصناف الاستمارة، الكميات، المواصفات، والاعتمادات
+                  </p>
+                </div>
+              </div>
+            </div>
+
+            {(() => {
+              const relevantLogs = auditLogs.filter(
+                (l) =>
+                  l.orderId === order.id ||
+                  (order.referenceNumber && l.orderReference === order.referenceNumber) ||
+                  (order.referenceNumber && l.target.includes(order.referenceNumber))
+              );
+
+              if (relevantLogs.length === 0) {
+                return (
+                  <div className="text-center py-6 bg-white rounded-lg border border-dashed border-slate-200 text-xs text-slate-500">
+                    لا توجد تعديلات مسجلة بعد لهذا الطلب. عند تعديل أي صنف أو كمية في الاستمارة سيتم تسجيل الفروقات هنا تلقائياً.
+                  </div>
+                );
+              }
+
+              return (
+                <div className="space-y-3">
+                  {relevantLogs.map((log) => {
+                    const isContentMod =
+                      log.category === 'CONTENT_MODIFICATION' ||
+                      Boolean(log.itemChanges && log.itemChanges.length > 0) ||
+                      Boolean(log.fieldDiffs && log.fieldDiffs.length > 0);
+
+                    return (
+                      <div
+                        key={log.id}
+                        className={`p-3.5 rounded-xl border transition ${
+                          isContentMod
+                            ? 'bg-amber-50/50 border-amber-200'
+                            : 'bg-white border-slate-200'
+                        }`}
+                      >
+                        <div className="flex flex-wrap items-center justify-between gap-2 mb-2">
+                          <div className="flex items-center gap-2">
+                            <span
+                              className={`text-[10px] font-bold px-2 py-0.5 rounded-md ${
+                                isContentMod
+                                  ? 'bg-amber-500 text-slate-950 font-black'
+                                  : log.category === 'APPROVAL'
+                                  ? 'bg-emerald-100 text-emerald-800'
+                                  : log.category === 'STATUS_CHANGE'
+                                  ? 'bg-blue-100 text-blue-800'
+                                  : 'bg-slate-100 text-slate-700'
+                              }`}
+                            >
+                              {log.action}
+                            </span>
+                            <span className="text-xs font-bold text-slate-800">
+                              {log.userName}
+                            </span>
+                            <span className="text-[10px] text-slate-500 font-medium">
+                              ({log.userRole})
+                            </span>
+                          </div>
+
+                          <span className="text-[10px] text-slate-400 font-mono" dir="ltr">
+                            {log.timestamp}
+                          </span>
+                        </div>
+
+                        <p className="text-xs text-slate-700 leading-relaxed mb-2">
+                          {log.details}
+                        </p>
+
+                        {/* If detailed diffs exist, render the modification component */}
+                        {(log.itemChanges?.length || log.fieldDiffs?.length || log.summaryChanges?.length) ? (
+                          <div className="mt-2 pt-2 border-t border-slate-200/70">
+                            <AuditModificationDetails log={log} />
+                          </div>
+                        ) : null}
+                      </div>
+                    );
+                  })}
+                </div>
+              );
+            })()}
+          </div>
         </div>
 
         {/* Modal Footer */}
